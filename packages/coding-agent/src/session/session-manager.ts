@@ -10,6 +10,7 @@ import type {
 	Usage,
 } from "@oh-my-pi/pi-ai";
 import { createSyntheticToolResultMessage } from "@oh-my-pi/pi-agent-core";
+import type { CompactionRecall } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	directoryIsEnterable,
 	getBlobsDir,
@@ -713,6 +714,8 @@ export class SessionManager {
 	readonly #persist: boolean;
 	readonly #storage: SessionStorage;
 	readonly #blobs: BlobStore;
+	/** Current `compaction.recall` setting, read on every context rebuild. */
+	#compactionRecall: () => CompactionRecall = () => "anchored";
 
 	#sessionId = "";
 	#sessionName: string | undefined;
@@ -3115,8 +3118,14 @@ export class SessionManager {
 	buildSessionContext(options?: BuildSessionContextOptions): SessionContext {
 		return buildSessionContext(this.#entries, this.#index.leafId(), this.#index.entriesById(), {
 			resolveFrameData: data => lazyImageDataSync(this.#blobs, data),
+			compactionRecall: this.#compactionRecall(),
 			...options,
 		});
+	}
+
+	/** Bind context rebuilds to the live `compaction.recall` setting. */
+	setCompactionRecallResolver(resolve: () => CompactionRecall): void {
+		this.#compactionRecall = resolve;
 	}
 
 	/** Strip stale OpenAI Responses assistant replay metadata from loaded entries. */

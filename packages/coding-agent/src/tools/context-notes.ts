@@ -12,13 +12,14 @@ import {
 	MAX_CONTEXT_NOTES_BYTES,
 	type ContextNotesEntry,
 } from "../session/context-notes";
+import type { SessionEntry } from "../session/session-entries";
 import contextNotesDescription from "../prompts/tools/context-notes.md" with { type: "text" };
 import newContextDescription from "../prompts/tools/new-context.md" with { type: "text" };
 import type { ToolSession } from ".";
 import { throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
-import { cfgCompactionExperimentalContextManagement } from "../session/context-settings";
+import { cfgCompactionExperimentalContextManagement, cfgCompactionRecall } from "../session/context-settings";
 
 const contextNotesSchema = type({
 	"text?": type("string").describe("Entire replacement notebook text. Omit to read; use an empty string to clear."),
@@ -41,20 +42,45 @@ export interface NewContextToolDetails {
 
 type ExperimentalContextSessionManager = NonNullable<ToolSession["sessionManager"]>;
 
-function resolveExperimentalContextSession(session: ToolSession): ExperimentalContextSessionManager | undefined {
-	if (cfgCompactionExperimentalContextManagement.get(session.settings) !== true || session.isDisposed?.()) {
-		return undefined;
-	}
+/**
+ * The live session journal owned by this ToolSession. The identity comparison prevents advisor
+ * tools from writing the parent agent's notebook or resolving its raw history.
+ */
+function resolveOwnedSession(session: ToolSession): ExperimentalContextSessionManager | undefined {
+	if (session.isDisposed?.()) return undefined;
 	const manager = session.sessionManager;
 	const ownerId = session.getSessionId?.();
 	if (!manager || !ownerId || manager.getSessionId?.() !== ownerId) return undefined;
 	return manager;
 }
 
+function resolveExperimentalContextSession(session: ToolSession): ExperimentalContextSessionManager | undefined {
+	if (cfgCompactionExperimentalContextManagement.get(session.settings) !== true) return undefined;
+	return resolveOwnedSession(session);
+}
+
+/**
+ * Current branch of the session journal owned by this ToolSession, backing `history://current/full`.
+ * Anchored compaction recall keeps raw history recoverable after any compaction; classic recall
+ * keeps the route behind experimental context management, as before.
+ */
+export function getOwnedSessionBranch(session: ToolSession): readonly SessionEntry[] {
+	if (
+		cfgCompactionRecall.get(session.settings) === "classic" &&
+		cfgCompactionExperimentalContextManagement.get(session.settings) !== true
+	) {
+		throw new ToolError(
+			"history://current/full requires compaction.recall: anchored or compaction.experimentalContextManagement.",
+		);
+	}
+	const manager = resolveOwnedSession(session);
+	if (!manager) throw new ToolError("Raw session history is unavailable for this session.");
+	return manager.getBranch();
+}
+
 /**
  * Resolves the live session journal only when experimental context management is enabled and
- * owned by this ToolSession. The identity comparison prevents advisor tools from writing the
- * parent agent's notebook or resolving its raw history.
+ * owned by this ToolSession.
  */
 export function getExperimentalContextSession(session: ToolSession): ExperimentalContextSessionManager {
 	const manager = resolveExperimentalContextSession(session);

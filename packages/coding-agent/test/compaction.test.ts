@@ -18,10 +18,15 @@ import * as ai from "@oh-my-pi/pi-ai";
 import { encodeTextSignatureV1 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { AssistantMessage, Model, ProviderPayload, Usage } from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
+import {
+	type BuildSessionContextOptions,
+	buildSessionContext,
+} from "@oh-my-pi/pi-coding-agent/session/session-context";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import type {
 	CompactionEntry,
 	ModelChangeEntry,
+	ResetBoundaryEntry,
 	SessionEntry,
 	SessionMessageEntry,
 	ThinkingLevelChangeEntry,
@@ -147,6 +152,28 @@ function createCompactionEntry(summary: string, firstKeptEntryId: string): Compa
 	};
 	lastId = id;
 	return entry;
+}
+
+function createResetBoundaryEntry(): ResetBoundaryEntry {
+	const id = `test-id-${entryCounter++}`;
+	const entry: ResetBoundaryEntry = {
+		type: "reset_boundary",
+		id,
+		parentId: lastId,
+		timestamp: new Date().toISOString(),
+	};
+	lastId = id;
+	return entry;
+}
+
+/** Text the model receives for the compaction summary of `entries`. */
+function llmSummaryText(entries: SessionEntry[], options?: BuildSessionContextOptions): string {
+	const [summary] = convertToLlm(buildSessionContext(entries, undefined, undefined, options).messages);
+	const content = summary?.content;
+	if (typeof content === "string") return content;
+	const block = content?.[0];
+	if (block?.type !== "text") throw new Error("Expected a text compaction summary");
+	return block.text;
 }
 
 function createModelChangeEntry(provider: string, modelId: string): ModelChangeEntry {
@@ -1502,6 +1529,108 @@ describe("buildSessionContext", () => {
 		expect(loaded.messages.length).toBe(5);
 		expect(loaded.messages[0].role).toBe("compactionSummary");
 		expect((loaded.messages[0] as any).summary).toContain("Summary of 1,a,2,b");
+	});
+
+	it("carries the user's own summarized requests verbatim and points at the raw transcript", () => {
+		const rule = createMessageEntry(createUserMessage("Always use bun, never npm."));
+		const a1 = createMessageEntry(createAssistantMessage("ok"));
+		const steer = createMessageEntry({
+			role: "user",
+			content: "subagent steer text",
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+		const a2 = createMessageEntry(createAssistantMessage("noted"));
+		const preference = createMessageEntry(createUserMessage("Threshold must be a percentage."));
+		const a3 = createMessageEntry(createAssistantMessage("done"));
+		const kept = createMessageEntry(createUserMessage("Now run the tests."));
+		const compaction = createCompactionEntry("Summary", kept.id);
+
+		const text = llmSummaryText([rule, a1, steer, a2, preference, a3, kept, compaction]);
+
+		const ruleAt = text.indexOf("Always use bun, never npm.");
+		expect(ruleAt).toBeGreaterThan(-1);
+		expect(text.indexOf("Threshold must be a percentage.")).toBeGreaterThan(ruleAt);
+		// Agent-attributed user-role messages are not the user's words.
+		expect(text).not.toContain("subagent steer text");
+		// The retained tail already reaches the model verbatim as its own message.
+		expect(text).not.toContain("Now run the tests.");
+		expect(text).toContain("history://current/full");
+	});
+
+	it("bounds pinned requests by the compacted context size, truncating the newest overflow head and tail", () => {
+		const older = createMessageEntry(createUserMessage("older request that no longer fits"));
+		const a1 = createMessageEntry(createAssistantMessage("ok"));
+		const large = createMessageEntry(createUserMessage(`START ${"filler ".repeat(3000)}END`));
+		const a2 = createMessageEntry(createAssistantMessage("ok"));
+		const kept = createMessageEntry(createUserMessage("latest"));
+		// tokensBefore 10_000 -> a 1_000-token pin budget, well below the ~3_000-token request.
+		const compaction = createCompactionEntry("Summary", kept.id);
+
+		const text = llmSummaryText([older, a1, large, a2, kept, compaction]);
+
+		expect(text).toContain("START");
+		expect(text).toContain("END");
+		expect(text).toContain("ch elided");
+		expect(text).not.toContain("filler ".repeat(3000));
+		expect(text).not.toContain("older request that no longer fits");
+	});
+
+	it("classic recall keeps the summary alone, without verbatim requests or the raw-history pointer", () => {
+		const rule = createMessageEntry(createUserMessage("Always use bun, never npm."));
+		const a1 = createMessageEntry(createAssistantMessage("ok"));
+		const kept = createMessageEntry(createUserMessage("Now run the tests."));
+		const compaction = createCompactionEntry("Summary", kept.id);
+		const entries = [rule, a1, kept, compaction];
+
+		const classic = llmSummaryText(entries, { compactionRecall: "classic" });
+
+		expect(llmSummaryText(entries)).toContain("Always use bun, never npm.");
+		expect(classic).not.toContain("Always use bun, never npm.");
+		expect(classic).not.toContain("history://current/full");
+	});
+
+	it("does not pin requests from before a /clear boundary", () => {
+		const cleared = createMessageEntry(createUserMessage("request the user cleared"));
+		const reset = createResetBoundaryEntry();
+		const fresh = createMessageEntry(createUserMessage("fresh request after clear"));
+		const a1 = createMessageEntry(createAssistantMessage("ok"));
+		const kept = createMessageEntry(createUserMessage("latest"));
+		const compaction = createCompactionEntry("Summary", kept.id);
+
+		const text = llmSummaryText([cleared, reset, fresh, a1, kept, compaction]);
+
+		expect(text).toContain("fresh request after clear");
+		expect(text).not.toContain("request the user cleared");
+	});
+
+	it("does not pin requests an empty-tail native snapshot replays verbatim", () => {
+		const summarized = createMessageEntry(createUserMessage("request covered by the snapshot"));
+		const a1 = createMessageEntry(createAssistantMessage("ok"));
+		const appended = createMessageEntry(createUserMessage("request appended after the snapshot"));
+		const a2 = createMessageEntry(createAssistantMessage("ok"));
+		const compaction: CompactionEntry = {
+			...createCompactionEntry("Summary", ""),
+			providerReplayThroughEntryId: a1.id,
+			preserveData: {
+				anthropicCompaction: {
+					provider: "anthropic",
+					content: "Summary",
+					signature: "snapshot-signature",
+				},
+			},
+		};
+		const entries = [summarized, a1, appended, a2, compaction];
+
+		const text = llmSummaryText(entries);
+		const replayed = buildSessionContext(entries).messages.slice(1);
+
+		expect(text).toContain("request covered by the snapshot");
+		expect(text).not.toContain("request appended after the snapshot");
+		expect(replayed.map(m => (m.role === "user" ? m.content : m.role))).toEqual([
+			"request appended after the snapshot",
+			"assistant",
+		]);
 	});
 
 	it("re-attaches snapcompact frames from preserveData as compaction summary images", () => {

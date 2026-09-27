@@ -775,7 +775,7 @@ export interface SerializeOptions {
 }
 
 /** Keep the head and tail of `text`, eliding the middle beyond `maxChars`. */
-function truncateForSummary(text: string, maxChars: number, headRatio: number): string {
+export function truncateForSummary(text: string, maxChars: number, headRatio: number): string {
 	if (text.length <= maxChars) return text;
 	const ratio = Math.min(Math.max(headRatio, 0), 1);
 	const headChars = Math.round(maxChars * ratio);

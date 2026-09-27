@@ -300,6 +300,28 @@ export const cfgCompactionDropUseless = register({
 });
 
 /** Every `compaction.*` setting as one memoized snapshot (the configured compaction policy). */
+export const cfgCompactionRecall = register({
+	id: "compaction.recall",
+	type: "enum",
+	values: ["anchored", "classic"] as const,
+	default: "anchored",
+	ui: {
+		tab: "context",
+		group: "Compaction",
+		label: "Compaction Recall",
+		description: "How much of the compacted history the next context window can recall",
+		options: [
+			{
+				value: "anchored",
+				label: "Anchored",
+				description:
+					"Keep your own messages verbatim, tool-output tails, and failed approaches; point at the raw transcript.",
+			},
+			{ value: "classic", label: "Classic", description: "Summary only; tool outputs truncated to their head." },
+		],
+	},
+});
+
 export const cfgCompaction = combine({
 	enabled: cfgCompactionEnabled,
 	experimentalContextManagement: cfgCompactionExperimentalContextManagement,
@@ -320,6 +342,7 @@ export const cfgCompaction = combine({
 	idleTimeoutSeconds: cfgCompactionIdleTimeoutSeconds,
 	supersedeReads: cfgCompactionSupersedeReads,
 	dropUseless: cfgCompactionDropUseless,
+	recall: cfgCompactionRecall,
 });
 
 /** Configured compaction policy ({@link cfgCompaction}). */

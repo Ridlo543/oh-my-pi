@@ -22,6 +22,7 @@ import {
 import branchSummaryPrompt from "./prompts/branch-summary.md" with { type: "text" };
 import branchSummaryPreamble from "./prompts/branch-summary-preamble.md" with { type: "text" };
 import {
+	type CompactionRecall,
 	computeFileLists,
 	createFileOps,
 	extractFileOpsFromMessage,
@@ -78,6 +79,8 @@ export interface GenerateBranchSummaryOptions {
 	signal: AbortSignal;
 	/** Optional custom instructions for summarization */
 	customInstructions?: string;
+	/** Recall mode shaping tool-output truncation in the summary input; unset means `anchored`. */
+	recall?: CompactionRecall;
 	/** Tokens reserved for prompt + LLM response (default 16384) */
 	reserveTokens?: number;
 	/** Optional metadata forwarded to the underlying API request (e.g. user_id for session attribution). */
@@ -208,7 +211,7 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 	}
 }
 
-function estimateBranchSummaryTokens(message: AgentMessage, tokenizer: Tokenizer): number {
+function estimateBranchSummaryTokens(message: AgentMessage, tokenizer: Tokenizer, recall?: CompactionRecall): number {
 	if (message.role !== "toolResult") return tokenizer.countMessage(message);
 	const text = message.content
 		.filter((c): c is { type: "text"; text: string } => c.type === "text")
@@ -217,7 +220,7 @@ function estimateBranchSummaryTokens(message: AgentMessage, tokenizer: Tokenizer
 	if (!text) return 0;
 	return tokenizer.countMessage({
 		...message,
-		content: [{ type: "text", text: truncateToolResultForSummary(text) }],
+		content: [{ type: "text", text: truncateToolResultForSummary(text, recall) }],
 	});
 }
 
@@ -238,6 +241,7 @@ export function prepareBranchEntries(
 	entries: SessionEntry[],
 	tokenizer: Tokenizer,
 	tokenBudget: number = 0,
+	recall?: CompactionRecall,
 ): BranchPreparation {
 	const messages: AgentMessage[] = [];
 	const fileOps = createFileOps();
@@ -270,7 +274,7 @@ export function prepareBranchEntries(
 		// Extract file ops from assistant messages (tool calls)
 		extractFileOpsFromMessage(message, fileOps);
 
-		const tokens = estimateBranchSummaryTokens(message, tokenizer);
+		const tokens = estimateBranchSummaryTokens(message, tokenizer, recall);
 
 		// Check budget before adding
 		if (tokenBudget > 0 && totalTokens + tokens > tokenBudget) {
@@ -317,7 +321,7 @@ export async function generateBranchSummary(
 	const tokenBudget = contextWindow - reserveTokens;
 	const tokenizer = new Tokenizer(model);
 
-	const { messages, fileOps } = prepareBranchEntries(entries, tokenizer, tokenBudget);
+	const { messages, fileOps } = prepareBranchEntries(entries, tokenizer, tokenBudget, options.recall);
 
 	if (messages.length === 0) {
 		return { summary: "No content to summarize" };
@@ -326,7 +330,7 @@ export async function generateBranchSummary(
 	// Transform to LLM-compatible messages, then serialize to text
 	// Serialization prevents the model from treating it as a conversation to continue
 	const llmMessages = (options.convertToLlm ?? defaultConvertToLlm)(messages);
-	const conversationText = serializeConversationForSummary(llmMessages, preferredDialect(model.id));
+	const conversationText = serializeConversationForSummary(llmMessages, preferredDialect(model.id), options.recall);
 
 	// Build prompt
 	const instructions = customInstructions || BRANCH_SUMMARY_PROMPT;

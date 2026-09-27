@@ -294,6 +294,8 @@ export class Tokenizer {
 			case "compactionSummary": {
 				fragments.push(message.summary);
 				if (message.role === "compactionSummary") {
+					// Rendered verbatim next to the summary (see convertMessageToLlm).
+					if (message.userMessages) fragments.push(...message.userMessages);
 					if (message.blocks) {
 						for (const block of message.blocks) {
 							if (block.type === "text") fragments.push(block.text);

@@ -87,6 +87,7 @@ import handoffDocumentPrompt from "./prompts/handoff-document.md" with { type: "
 import snapcompactArchiveContextPrompt from "./prompts/snapcompact-archive-context.md" with { type: "text" };
 
 import {
+	type CompactionRecall,
 	computeFileLists,
 	createFileOps,
 	escapeSummaryBoundaryTags,
@@ -206,6 +207,8 @@ export interface CompactionSettings {
 	remoteEndpoint?: string;
 	remoteStreamingV2Enabled?: boolean;
 	v2RetainedMessageBudget?: number;
+	/** Recall mode for local summaries; unset means `anchored`. */
+	recall?: CompactionRecall;
 }
 
 /** Reserve applied when {@link CompactionSettings.reserveTokens} is unset. */
@@ -575,13 +578,12 @@ export function findCutPoint(
 // Summarization
 // ============================================================================
 
-const SUMMARIZATION_PROMPT = prompt.render(compactionSummaryPrompt);
-
-const UPDATE_SUMMARIZATION_PROMPT = prompt.render(compactionUpdateSummaryPrompt);
+/** Render a summarizer prompt whose sections differ between recall modes. */
+function renderRecallPrompt(template: string, recall: CompactionRecall | undefined): string {
+	return prompt.render(template, { anchored: recall !== "classic" });
+}
 
 const SHORT_SUMMARY_PROMPT = prompt.render(compactionShortSummaryPrompt);
-
-const HANDOFF_DOCUMENT_PROMPT = prompt.render(handoffDocumentPrompt);
 
 export const AUTO_HANDOFF_THRESHOLD_FOCUS = prompt.render(autoHandoffThresholdFocusPrompt);
 
@@ -732,6 +734,8 @@ export interface SummaryOptions {
 	 * stacks on top of the inner backoff.
 	 */
 	oneshotRetry?: OneshotRetryOptions | false;
+	/** Recall mode shaping summarizer prompts and tool-output truncation; unset means `anchored`. */
+	recall?: CompactionRecall;
 }
 
 /**
@@ -837,12 +841,13 @@ function planSummaryWindows(
 	tokenizer: Tokenizer,
 	dialect: Dialect | undefined,
 	budgetTokens: number,
+	recall?: CompactionRecall,
 ): Message[][] {
 	const windows: Message[][] = [];
 	let current: Message[] = [];
 	let currentTokens = 0;
 	for (const message of messages) {
-		const tokens = tokenizer.countTokens(serializeConversationForSummary([message], dialect));
+		const tokens = tokenizer.countTokens(serializeConversationForSummary([message], dialect, recall));
 		if (currentTokens > 0 && currentTokens + tokens > budgetTokens) {
 			windows.push(current);
 			current = [];
@@ -872,7 +877,7 @@ export async function generateSummary(
 	const llmMessages = (options?.convertToLlm ?? defaultConvertToLlm)(currentMessages);
 	const dialect = preferredDialect(model.id);
 	const tokenizer = new Tokenizer(model);
-	const wholeConversation = serializeConversationForSummary(llmMessages, dialect);
+	const wholeConversation = serializeConversationForSummary(llmMessages, dialect, options?.recall);
 	const budgetTokens = summaryInputBudgetTokens(model, maxTokens);
 	// A span that outgrew the summarizer's window is summarized as a fold: each
 	// window updates the summary carried out of the previous one, which is the
@@ -883,12 +888,15 @@ export async function generateSummary(
 	// common case and costs exactly the one call it always did.
 	const pending: SummaryWindow[] = tokenizer.checkTokenBudget(wholeConversation, budgetTokens).fits
 		? [{ messages: llmMessages, budgetTokens, text: wholeConversation }]
-		: planSummaryWindows(llmMessages, tokenizer, dialect, budgetTokens).map(messages => ({ messages, budgetTokens }));
+		: planSummaryWindows(llmMessages, tokenizer, dialect, budgetTokens, options?.recall).map(messages => ({
+				messages,
+				budgetTokens,
+			}));
 
 	let carriedSummary = previousSummary;
 	while (pending.length > 0) {
 		const window = pending[0];
-		const text = window.text ?? serializeConversationForSummary(window.messages, dialect);
+		const text = window.text ?? serializeConversationForSummary(window.messages, dialect, options?.recall);
 		// A budget probe, not a raw count: a window whose bytes already fit needs
 		// neither an exact count nor the clamp, and the bust path hands back the
 		// exact count the proportional clamp needs as its denominator.
@@ -926,7 +934,7 @@ export async function generateSummary(
 			pending.splice(
 				0,
 				1,
-				...planSummaryWindows(window.messages, tokenizer, dialect, halved).map(messages => ({
+				...planSummaryWindows(window.messages, tokenizer, dialect, halved, options?.recall).map(messages => ({
 					messages,
 					budgetTokens: halved,
 				})),
@@ -950,7 +958,10 @@ async function summarizeConversationWindow(
 	options: SummaryOptions | undefined,
 ): Promise<string> {
 	// Use update prompt if we have a previous summary, otherwise initial prompt
-	let basePrompt = previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;
+	let basePrompt = renderRecallPrompt(
+		previousSummary ? compactionUpdateSummaryPrompt : compactionSummaryPrompt,
+		options?.recall,
+	);
 	if (options?.promptOverride) {
 		basePrompt = options.promptOverride;
 	}
@@ -1051,12 +1062,14 @@ export interface HandoffOptions {
 	 * `resolveCompactionEffort` for the conversion contract.
 	 */
 	thinkingLevel?: ThinkingLevel;
+	/** Recall mode shaping the handoff prompt; unset means `anchored`. */
+	recall?: CompactionRecall;
 }
 
-export function renderHandoffPrompt(customInstructions?: string): string {
-	if (!customInstructions) return HANDOFF_DOCUMENT_PROMPT;
+export function renderHandoffPrompt(customInstructions?: string, recall?: CompactionRecall): string {
 	return prompt.render(handoffDocumentPrompt, {
-		additionalFocus: customInstructions,
+		anchored: recall !== "classic",
+		additionalFocus: customInstructions || undefined,
 	});
 }
 
@@ -1143,7 +1156,7 @@ export async function generateHandoff(
 		...llmMessages,
 		{
 			role: "user",
-			content: [{ type: "text", text: renderHandoffPrompt(options.customInstructions) }],
+			content: [{ type: "text", text: renderHandoffPrompt(options.customInstructions, options.recall) }],
 			attribution: "agent",
 			timestamp: Date.now(),
 		},
@@ -1176,7 +1189,7 @@ async function generateShortSummary(
 ): Promise<string> {
 	const maxTokens = Math.min(512, Math.floor(0.2 * reserveTokens));
 	const llmMessages = (options?.convertToLlm ?? defaultConvertToLlm)(recentMessages);
-	const conversationText = serializeConversationForSummary(llmMessages, preferredDialect(model.id));
+	const conversationText = serializeConversationForSummary(llmMessages, preferredDialect(model.id), options?.recall);
 
 	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
 	if (historySummary) {
@@ -1608,6 +1621,7 @@ export async function compact(
 		extraContext: options?.extraContext,
 		remoteEndpoint: settings.remoteEnabled === false ? undefined : settings.remoteEndpoint,
 		remoteSystemPrompt: options?.remoteSystemPrompt,
+		recall: settings.recall,
 		initiatorOverride: options?.initiatorOverride,
 		metadata: options?.metadata,
 		convertToLlm: options?.convertToLlm,
@@ -1904,7 +1918,7 @@ export async function compact(
 					messages,
 					tools: summaryOptions.tools,
 					instructions: buildAnthropicCompactionInstructions(
-						summaryOptions.promptOverride ?? SUMMARIZATION_PROMPT,
+						summaryOptions.promptOverride ?? renderRecallPrompt(compactionSummaryPrompt, summaryOptions.recall),
 						customInstructions,
 						formatAdditionalContext(summaryOptions.extraContext).trim() || undefined,
 					),
@@ -2065,7 +2079,7 @@ async function generateTurnPrefixSummary(
 	const maxTokens = Math.min(Math.floor(0.5 * reserveTokens), MAX_SUMMARY_TOKENS); // Smaller budget for turn prefix
 
 	const llmMessages = (options?.convertToLlm ?? defaultConvertToLlm)(messages);
-	const conversationText = serializeConversationForSummary(llmMessages, preferredDialect(model.id));
+	const conversationText = serializeConversationForSummary(llmMessages, preferredDialect(model.id), options?.recall);
 	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
 	const summarizationMessages = [
 		{

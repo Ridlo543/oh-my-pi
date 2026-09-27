@@ -9,7 +9,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { buildOpenAiNativeHistory } from "@oh-my-pi/pi-agent-core/compaction";
+import { buildOpenAiNativeHistory, createCompactionSummaryMessage } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Context, Message, TextContent } from "@oh-my-pi/pi-ai";
 import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type {
@@ -46,6 +46,7 @@ import {
 	stripPendingSecretPlaceholderSuffix,
 } from "@oh-my-pi/pi-coding-agent/secrets/placeholder";
 import { compileSecretRegex } from "@oh-my-pi/pi-coding-agent/secrets/regex";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { getActiveProfile, getAgentDir, setProfile } from "@oh-my-pi/pi-utils/dirs";
 
 describe("compileSecretRegex", () => {
@@ -437,6 +438,19 @@ describe("SecretObfuscator regex behavior", () => {
 		expect(JSON.stringify(obfuscated[4])).not.toContain(secret);
 		// System developer reminders remain untouched.
 		expect(obfuscated[1]).toBe(systemDeveloperMsg);
+	});
+
+	it("redacts secrets in user messages pinned next to a compaction summary", () => {
+		const secret = "SUPER_SECRET_TOKEN_12345";
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+		const summary = createCompactionSummaryMessage("## Goal\n- deploy", 10_000, new Date(0).toISOString(), {
+			userMessages: [`deploy with token ${secret}`],
+		});
+		const wire = convertToLlm([summary]);
+
+		// The pin reaches the provider-bound text, so it must go through outbound redaction.
+		expect(JSON.stringify(wire)).toContain(secret);
+		expect(JSON.stringify(obfuscateMessages(obfuscator, wire))).not.toContain(secret);
 	});
 
 	it("obfuscates file metadata on a replayed compaction payload but keeps the block verbatim", () => {

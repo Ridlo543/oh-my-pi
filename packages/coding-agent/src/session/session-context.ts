@@ -1,6 +1,10 @@
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { customMessageEntryMessage, isUserRequestEntry } from "@oh-my-pi/pi-tui/chat/transcript-entry";
-import { getAnthropicCompactionPayload, isTurnStartEntry } from "@oh-my-pi/pi-agent-core/compaction";
+import { type AgentMessage, Tokenizer } from "@oh-my-pi/pi-agent-core";
+import { customMessageEntryMessage, isUserRequestEntry, userTurnDraft } from "@oh-my-pi/pi-tui/chat/transcript-entry";
+import {
+	type CompactionRecall,
+	getAnthropicCompactionPayload,
+	isTurnStartEntry,
+} from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	coerceServiceTierByFamily,
 	type OpenAIResponsesHistoryPayload,
@@ -35,6 +39,14 @@ const LEGACY_SNAPCOMPACT_ARCHIVE_TEXT_GUARD = 250_000;
 const LEGACY_SNAPCOMPACT_TRUNCATED_CHARS_GUARD = 1_000_000;
 const SUPERSEDED_COMPACTION_SUMMARY = "[Superseded compaction summary elided after a newer compaction]";
 const SUPERSEDED_COMPACTION_SHORT_SUMMARY = "Superseded compaction elided";
+// Verbatim user-message budget carried next to a local compaction summary. The
+// cap follows Codex's COMPACT_USER_MESSAGE_MAX_TOKENS; the fraction of the
+// compacted context (`tokensBefore`, roughly where the threshold fired) keeps
+// small-window models from being flooded.
+const PINNED_USER_MESSAGES_MAX_TOKENS = 20_000;
+const PINNED_USER_MESSAGES_CONTEXT_FRACTION = 0.1;
+/** Raw pre-compaction transcript of the caller's own branch (see `history-protocol.ts`). */
+const CURRENT_FULL_HISTORY_URI = "history://current/full";
 
 function hasLegacySnapcompactFrames(archive: snapcompact.Archive): boolean {
 	return archive.frames.some(frame => frame.font === undefined && frame.variant === undefined);
@@ -167,6 +179,8 @@ export interface BuildSessionContextOptions {
 	keepDanglingToolCalls?: boolean;
 	/** Price and resolve persisted snapcompact frame payloads on demand. */
 	resolveFrameData?: (data: string) => snapcompact.LazyFrameData | undefined;
+	/** `classic` omits verbatim user requests and the raw-history pointer next to local summaries. */
+	compactionRecall?: CompactionRecall;
 }
 
 /**
@@ -213,6 +227,43 @@ export type TranscriptEntry = SessionMessageEntry | CustomMessageEntry;
 
 export function isTranscriptEntry(entry: SessionEntry): entry is TranscriptEntry {
 	return entry.type === "message" || entry.type === "custom_message";
+}
+
+let pinnedUserMessageTokenizer: Tokenizer | undefined;
+
+/**
+ * User requests in `path` strictly between `lowerBound` and `upperBound`, taken
+ * newest first until `budgetTokens` runs out and returned oldest first. Only the
+ * user's own words qualify: agent-attributed user-role messages (subagent task
+ * prompts, IRC steers, reminders) are skipped. The newest request that does not
+ * fit is head/tail-truncated into the remaining budget.
+ */
+function collectPinnedUserMessages(
+	path: SessionEntry[],
+	lowerBound: number,
+	upperBound: number,
+	budgetTokens: number,
+): string[] {
+	const pinned: string[] = [];
+	let remaining = budgetTokens;
+	for (let i = upperBound - 1; i > lowerBound && remaining > 0; i--) {
+		const entry = path[i];
+		if (!isTranscriptEntry(entry) || !isUserRequestEntry(entry)) continue;
+		if (entry.type === "message" && entry.message.role === "user" && entry.message.attribution === "agent") continue;
+		const text = userTurnDraft(entry)?.trim();
+		if (!text) continue;
+		pinnedUserMessageTokenizer ??= new Tokenizer();
+		const tokens = pinnedUserMessageTokenizer.countTokens(text);
+		if (tokens <= remaining) {
+			pinned.push(text);
+			remaining -= tokens;
+			continue;
+		}
+		const keepChars = Math.floor((text.length * remaining) / tokens);
+		if (keepChars > 0) pinned.push(snapcompact.truncateForSummary(text, keepChars, snapcompact.TRUNCATE_HEAD_RATIO));
+		break;
+	}
+	return pinned.reverse();
 }
 
 export function buildSessionContext(
@@ -498,6 +549,43 @@ export function buildSessionContext(
 		// Re-attach any archived snapcompact frames so the model can keep
 		// reading the archived history after every context rebuild.
 		const snapcompactArchive = snapcompact.getPreservedArchive(compaction.preserveData);
+		const snapcompactBlocks = snapcompactHistoryBlocksForContext(snapcompactArchive, options);
+		const isExperimentalRollover =
+			isRecord(compaction.details) && compaction.details.kind === "experimental-context-rollover";
+		// A summary paraphrases; the user's own requests from the summarized span
+		// ride along verbatim, resolved from the journal like the rollover
+		// retention below, and the raw transcript stays one read away. Native
+		// OpenAI replay already retains user messages, snapcompact archives embed
+		// the history, and notes-backed rollovers retain their latest request.
+		// First pre-compaction entry replayed verbatim after the summary, or -1:
+		// the kept tail, or for an Anthropic empty-tail snapshot the turns
+		// appended after it. Pinning and the kept-message emission below share it
+		// so no request is both pinned and replayed.
+		const firstKeptIdx = path.findIndex(
+			(entry, index) => index < compactionIdx && entry.id === compaction.firstKeptEntryId,
+		);
+		const snapshotIdx =
+			anthropicPayload && compaction.firstKeptEntryId === "" && compaction.providerReplayThroughEntryId
+				? path.findIndex(entry => entry.id === compaction.providerReplayThroughEntryId)
+				: -1;
+		const retainedStart = firstKeptIdx >= 0 ? firstKeptIdx : snapshotIdx >= 0 ? snapshotIdx + 1 : -1;
+		let userMessages: string[] | undefined;
+		let historyUri: string | undefined;
+		if (
+			!options?.transcript &&
+			options?.compactionRecall !== "classic" &&
+			!remoteReplacementHistory &&
+			!snapcompactBlocks &&
+			!isExperimentalRollover
+		) {
+			const summarizedEnd = retainedStart >= 0 && retainedStart < compactionIdx ? retainedStart : compactionIdx;
+			const budgetTokens = Math.min(
+				PINNED_USER_MESSAGES_MAX_TOKENS,
+				Math.floor(compaction.tokensBefore * PINNED_USER_MESSAGES_CONTEXT_FRACTION),
+			);
+			userMessages = collectPinnedUserMessages(path, resetBoundaryIdx, summarizedEnd, budgetTokens);
+			historyUri = CURRENT_FULL_HISTORY_URI;
+		}
 		const compactionSummaryMsg = createCompactionSummaryMessage(
 			compaction.summary,
 			compaction.tokensBefore,
@@ -505,11 +593,13 @@ export function buildSessionContext(
 			{
 				shortSummary: compaction.shortSummary,
 				providerPayload,
-				blocks: snapcompactHistoryBlocksForContext(snapcompactArchive, options),
+				blocks: snapcompactBlocks,
 				warning: compaction.warning,
 				method: compaction.method,
 				tokensAfter: compaction.tokensAfter,
 				historyRewriteAt,
+				userMessages,
+				historyUri,
 			},
 		);
 		// Agent context (non-transcript): summary first so the LLM sees the
@@ -525,11 +615,7 @@ export function buildSessionContext(
 		// Attribution follows the shared turn-initiator semantics so a
 		// user-invoked skill or writable-collab request is retained like an
 		// ordinary one instead of being skipped for an older plain user message.
-		if (
-			!options?.transcript &&
-			isRecord(compaction.details) &&
-			compaction.details.kind === "experimental-context-rollover"
-		) {
+		if (!options?.transcript && isExperimentalRollover) {
 			const firstKeptIdx = path.findIndex(entry => entry.id === compaction.firstKeptEntryId);
 			for (let i = compactionIdx - 1; i > resetBoundaryIdx; i--) {
 				const entry = path[i];
@@ -546,14 +632,6 @@ export function buildSessionContext(
 		// turns visible instead of showing only the summary and post-compaction.
 		if (!remoteReplacementHistory || options?.transcript) {
 			// Emit kept messages (before compaction, starting from firstKeptEntryId).
-			const firstKeptIdx = path.findIndex(
-				(entry, index) => index < compactionIdx && entry.id === compaction.firstKeptEntryId,
-			);
-			const snapshotIdx =
-				anthropicPayload && compaction.firstKeptEntryId === "" && compaction.providerReplayThroughEntryId
-					? path.findIndex(entry => entry.id === compaction.providerReplayThroughEntryId)
-					: -1;
-			const retainedStart = firstKeptIdx >= 0 ? firstKeptIdx : snapshotIdx >= 0 ? snapshotIdx + 1 : -1;
 			if (retainedStart >= 0 && retainedStart < compactionIdx) {
 				let displayStartIdx = retainedStart;
 				if (options?.transcript) {

@@ -3,13 +3,13 @@ import { serializeConversation } from "@oh-my-pi/pi-agent-core/compaction/utils"
 import type { Message } from "@oh-my-pi/pi-ai";
 
 describe("serializeConversation", () => {
-	it("truncates long tool results in serialized summaries", () => {
-		const longContent = "x".repeat(5000);
+	it("keeps the head and tail of long tool results so trailing failures reach the summarizer", () => {
+		const longContent = `$ bun test\n${"x".repeat(5000)}\nerror: expected 3 to equal 4 (math.test.ts:12)`;
 		const messages: Message[] = [
 			{
 				role: "toolResult",
 				toolCallId: "tc1",
-				toolName: "read",
+				toolName: "bash",
 				content: [{ type: "text", text: longContent }],
 				isError: false,
 				timestamp: Date.now(),
@@ -18,9 +18,9 @@ describe("serializeConversation", () => {
 
 		const result = serializeConversation(messages);
 
-		expect(result).toContain("[Tool Result]:");
-		expect(result).toContain("[... 3000 more characters truncated]");
-		expect(result).toContain("x".repeat(2000));
+		expect(result).toContain("[Tool Result]: $ bun test");
+		expect(result).toContain("error: expected 3 to equal 4 (math.test.ts:12)");
+		expect(result).toContain(`[…${longContent.length - 2000}ch elided…]`);
 		expect(result).not.toContain("x".repeat(3000));
 	});
 

@@ -9,6 +9,10 @@ Capture exact technical state, not abstractions.
 - File paths, symbol names, commands run
 - Test results, observed failures
 - Decisions made
+{{#if anchored}}
+- Failed attempts and rejected options, with the reason, so they are not repeated
+- Every requirement, correction, and preference the user stated
+{{/if}}
 - Partial work affecting the next step
 Register: address the successor directly in the imperative ("Fix X", "Run Y") — never first person ("I need to…", "my attempt…").
 The handoff mechanism is invisible to the document: NEVER list writing, generating, or delivering a handoff/summary/context document as progress or a next step. Progress and Next Steps cover the user's task only.
@@ -21,7 +25,11 @@ Use exactly this structure:
 [What the user is trying to accomplish]
 
 ## Constraints & Preferences
+{{#if anchored}}
+- [Every constraint, preference, correction, and prohibition the user stated; keep the user's wording for hard rules]
+{{else}}
 - [Any constraints, preferences, or requirements mentioned]
+{{/if}}
 
 ## Progress
 ### Done
@@ -35,6 +43,11 @@ Use exactly this structure:
 
 ## Key Decisions
 - **[Decision]**: [Rationale]
+{{#if anchored}}
+
+## Failed Approaches
+- **[Approach tried or option rejected]**: [Why it failed or was rejected]
+{{/if}}
 
 ## Critical Context
 - Code snippets, file paths, function/type names, error messages, data essential to continue

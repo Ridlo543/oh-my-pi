@@ -42,7 +42,7 @@ Compaction and branch summaries are first-class session entries, not plain assis
 
 When context is rebuilt (`buildSessionContext`):
 
-1. Latest compaction on the active path is converted to one `compactionSummary` message.
+1. Latest compaction on the active path is converted to one `compactionSummary` message. Under `compaction.recall: anchored` (the default), local summaries (not OpenAI native replay, snapcompact archives, or notes-backed rollovers) also carry the user's own requests from the summarized span verbatim, resolved from the journal newest first within `min(20_000, 10% of tokensBefore)` tokens and skipping agent-attributed user-role messages, plus a pointer to `history://current/full`.
 2. Kept entries from `firstKeptEntryId` to the compaction point are re-included.
 3. Later entries on the path are appended.
 4. `branch_summary` entries are converted to `branchSummary` messages.
@@ -170,12 +170,13 @@ Explicit compaction modes and focused instructions retain their existing behavio
 - The full-history route is bound to the calling session's current branch. It
   never falls back to another registered agent or an on-disk session search.
   Existing `history://<id>` routes retain their concise transcript behavior.
+  Under `compaction.recall: anchored` the route does not require this setting;
+  local compaction summaries point at it. Under `classic` it does.
 
 Experimental rollover requires the effective tool set to contain `context_notes`,
 `new_context`, `read`, and `grep`. Restricted sessions without all four retain
 legacy maintenance. Disabling the setting restores legacy compaction and disables
-the experimental tools and full-history route; existing notes remain in the journal
-and provider context.
+the experimental tools (and, under `compaction.recall: classic`, the full-history route); existing notes remain in the journal and provider context.
 
 The default is `false`. This is an independent implementation of persistent notes
 and searchable history, with the existing session journal as its only transcript
@@ -488,6 +489,7 @@ Defined in `packages/coding-agent/src/session/context-settings.ts`:
 
 - `compaction.enabled` = `true`
 - `compaction.experimentalContextManagement` = `false`. Opt-in persistent notes, branch-bound raw-history retrieval, and local context-window rollover; toggling it adds or removes `context_notes`/`new_context` in the running session.
+- `compaction.recall` = `"anchored"`. Selects how summaries preserve detail. `anchored` pins the user's summarized requests verbatim, asks the summarizer for rejected approaches and exact corrections, keeps both the head and tail of long tool outputs (2000 chars, 60/40), and points at `history://current/full`. `classic` reproduces the previous behavior: summary text only, head-only tool-output truncation, and the full-history route gated behind `compaction.experimentalContextManagement`.
 - `compaction.methodOrder` = `["remote", "snapcompact", "handoff", "shake", "soft"]`. `remote` uses provider-native server compaction (OpenAI Responses compact, Anthropic compaction beta) when available; unavailable or failed methods advance to the next preference.
 - `compaction.asyncEnabled` = `true`. Async (speculative) compaction: when context enters the pre-threshold band `[threshold − lead, threshold)` (lead = `clamp(threshold × 0.125, 8192, 32000)`), maintenance starts a background summarization for the first configured LLM-backed method (`remote`, `handoff`, or `soft`) off a branch snapshot, isolated from the live turn by a side session id. The armed result is committed instantly when the threshold is actually crossed, hiding summarization latency; post-snapshot turns are appended after the summary unchanged. Armed results are discarded when the branch prefix changes (new compaction, reset boundary, `/tree` navigation), when a provider-native replay payload is no longer readable by the active model, or when context grows past `keepRecentTokens` since compute (a fresh speculation replaces it). Speculation is skipped while an extension registers `session_before_compact`. The status line pulses the auto-compact icon while a speculation runs and holds it in accent when a result is armed.
 - `compaction.reserveTokens` is unset by default. The compaction layer normally applies a `16384`-token floor and at least 15% of the context window; on small windows where that default would be impractical, budget checks use the 15% proportional reserve. An explicit configured reserve is honored.

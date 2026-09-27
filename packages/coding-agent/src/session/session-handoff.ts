@@ -18,7 +18,7 @@ import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import type { SessionManager } from "./session-manager";
 
-import { cfgCompactionHandoffSaveToDisk } from "./context-settings";
+import { cfgCompactionHandoffSaveToDisk, cfgCompactionRecall } from "./context-settings";
 
 function createHandoffFileName(date = new Date()): string {
 	const fileTimestamp = date.toISOString().replace(/[:.]/g, "-");
@@ -139,7 +139,10 @@ export class SessionHandoff {
 			// Both can diverge from this.#host.sessionId() (tan/subagent/shared sessions), so
 			// mirror exactly what the live turn populated the cache under.
 			const handoffPromptCacheKey = this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId;
-			const handoffPromptText = renderHandoffPrompt(this.#host.obfuscateTextForProvider(customInstructions));
+			const handoffPromptText = renderHandoffPrompt(
+				this.#host.obfuscateTextForProvider(customInstructions),
+				cfgCompactionRecall.get(this.#host.settings),
+			);
 			const handoffSnapshot: AgentMessage[] = [
 				...this.#host.agent.state.messages,
 				{

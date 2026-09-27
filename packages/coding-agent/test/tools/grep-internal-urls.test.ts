@@ -24,7 +24,6 @@ import { AstGrepTool } from "../../src/tools/ast-grep";
 import { GlobTool } from "../../src/tools/glob";
 import { GrepTool } from "../../src/tools/grep";
 
-import { cfgCompactionExperimentalContextManagement } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { cfgReadSummarizeEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 function getResultText(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -207,8 +206,8 @@ describe("GrepTool internal URL resolution", () => {
 	});
 
 	it("greps the caller-bound full current branch without materializing a session file", async () => {
+		// Default settings: raw-history recovery does not require experimental context management.
 		const settings = Settings.isolated({ "grep.contextBefore": 0, "grep.contextAfter": 0 });
-		cfgCompactionExperimentalContextManagement.set(settings, true);
 		const branch = [
 			{
 				type: "message",
@@ -236,6 +235,79 @@ describe("GrepTool internal URL resolution", () => {
 		});
 
 		expect(getResultText(result)).toContain("searchable pre-compaction needle");
+	});
+
+	it("keeps current/full behind experimental context management under classic recall", async () => {
+		const settings = Settings.isolated({
+			"grep.contextBefore": 0,
+			"grep.contextAfter": 0,
+			"compaction.recall": "classic",
+		});
+		const branch = [
+			{
+				type: "message",
+				id: "classic-source",
+				parentId: null,
+				timestamp: new Date().toISOString(),
+				message: { role: "user", content: "classic pre-compaction needle", timestamp: 1 },
+			},
+		] as unknown as SessionEntry[];
+		const manager = {
+			getBranch: () => branch,
+			getSessionId: () => "classic-session",
+		} as unknown as NonNullable<ToolSession["sessionManager"]>;
+		const tool = new GrepTool(
+			createSession({
+				settings,
+				getSessionId: () => "classic-session",
+				sessionManager: manager,
+			}),
+		);
+
+		const outcome = await tool
+			.execute("classic-history-search", { pattern: "pre-compaction needle", path: "history://current/full" })
+			.then(
+				result => getResultText(result),
+				(error: unknown) => (error instanceof Error ? error.message : String(error)),
+			);
+
+		expect(outcome).not.toContain("classic pre-compaction needle");
+		expect(outcome).toContain("requires compaction.recall: anchored");
+	});
+
+	it("does not expose another session's branch through current/full", async () => {
+		const settings = Settings.isolated({ "grep.contextBefore": 0, "grep.contextAfter": 0 });
+		const branch = [
+			{
+				type: "message",
+				id: "parent-source",
+				parentId: null,
+				timestamp: new Date().toISOString(),
+				message: { role: "user", content: "parent-only secret needle", timestamp: 1 },
+			},
+		] as unknown as SessionEntry[];
+		// An advisor tool session shares the parent's journal but has its own session id.
+		const parentManager = {
+			getBranch: () => branch,
+			getSessionId: () => "parent-session",
+		} as unknown as NonNullable<ToolSession["sessionManager"]>;
+		const tool = new GrepTool(
+			createSession({
+				settings,
+				getSessionId: () => "advisor-session",
+				sessionManager: parentManager,
+			}),
+		);
+
+		const outcome = await tool
+			.execute("foreign-history-search", { pattern: "secret needle", path: "history://current/full" })
+			.then(
+				result => getResultText(result),
+				(error: unknown) => (error instanceof Error ? error.message : String(error)),
+			);
+
+		expect(outcome).not.toContain("parent-only secret needle");
+		expect(outcome).toContain("Raw session history is unavailable for this session.");
 	});
 
 	it("resolves artifact:// URL to backing file and greps it", async () => {

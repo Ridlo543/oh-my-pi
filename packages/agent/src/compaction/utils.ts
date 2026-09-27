@@ -6,6 +6,7 @@ import type { Message, ToolCall } from "@oh-my-pi/pi-ai";
 import { type Dialect, getDialectDefinition } from "@oh-my-pi/pi-ai/dialect";
 import { escapeHarmonyControlTokens } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { formatGroupedPaths, prompt, stringifyJson } from "@oh-my-pi/pi-utils";
+import { TRUNCATE_HEAD_RATIO, truncateForSummary } from "@oh-my-pi/snapcompact";
 import type { AgentMessage } from "../types";
 import fileOperationsTemplate from "./prompts/file-operations.md" with { type: "text" };
 import summarizationSystemPrompt from "./prompts/summarization-system.md" with { type: "text" };
@@ -196,13 +197,23 @@ export function upsertFileOperations(
 // Message Serialization
 // ============================================================================
 
+/**
+ * How much of the compacted history the next context window can recall.
+ * - `anchored`: summaries keep tool-output tails, record failed approaches, and
+ *   sit next to the user's own requests verbatim plus a raw-history pointer.
+ * - `classic`: summary only, tool outputs truncated to their head.
+ */
+export type CompactionRecall = "anchored" | "classic";
+
 /** Maximum characters for a tool result in serialized summaries. */
 const TOOL_RESULT_MAX_CHARS = 2000;
 
 /**
  * Truncate tool results to the same representation used in summarization prompts.
+ * Anchored recall keeps head and tail: build and test failures usually land at the end of the output.
  */
-export function truncateToolResultForSummary(text: string): string {
+export function truncateToolResultForSummary(text: string, recall?: CompactionRecall): string {
+	if (recall !== "classic") return truncateForSummary(text, TOOL_RESULT_MAX_CHARS, TRUNCATE_HEAD_RATIO);
 	if (text.length <= TOOL_RESULT_MAX_CHARS) return text;
 	const truncatedChars = text.length - TOOL_RESULT_MAX_CHARS;
 	return `${text.slice(0, TOOL_RESULT_MAX_CHARS)}\n\n[... ${truncatedChars} more characters truncated]`;
@@ -218,8 +229,12 @@ export function escapeSummaryBoundaryTags(text: string): string {
 /**
  * Serialize LLM messages as plain summary input without provider control tokens.
  */
-export function serializeConversationForSummary(messages: Message[], dialect?: Dialect): string {
-	const conversation = serializeConversation(messages, dialect);
+export function serializeConversationForSummary(
+	messages: Message[],
+	dialect?: Dialect,
+	recall?: CompactionRecall,
+): string {
+	const conversation = serializeConversation(messages, dialect, recall);
 	const escaped = dialect === "harmony" ? escapeHarmonyControlTokens(conversation) : conversation;
 	return escapeSummaryBoundaryTags(escaped);
 }
@@ -228,7 +243,7 @@ export function serializeConversationForSummary(messages: Message[], dialect?: D
  * Serialize LLM messages to transcript text.
  * Call convertToLlm() first to handle custom message types.
  */
-export function serializeConversation(messages: Message[], dialect?: Dialect): string {
+export function serializeConversation(messages: Message[], dialect?: Dialect, recall?: CompactionRecall): string {
 	// Tool results flagged contextually useless (and their paired calls) are
 	// dropped from the serialized text: the source region is discarded after
 	// summarization anyway, so excluding them costs nothing and keeps garbage
@@ -267,7 +282,7 @@ export function serializeConversation(messages: Message[], dialect?: Dialect): s
 				if (!text) continue;
 				processed.push({
 					...msg,
-					content: [{ type: "text", text: truncateToolResultForSummary(text) }],
+					content: [{ type: "text", text: truncateToolResultForSummary(text, recall) }],
 				});
 				continue;
 			}
@@ -319,7 +334,7 @@ export function serializeConversation(messages: Message[], dialect?: Dialect): s
 				.map(c => c.text)
 				.join("");
 			if (content) {
-				const text = truncateToolResultForSummary(content);
+				const text = truncateToolResultForSummary(content, recall);
 				parts.push(`[Tool Result]: ${text}`);
 			}
 		}

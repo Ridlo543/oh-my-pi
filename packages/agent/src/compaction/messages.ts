@@ -71,7 +71,17 @@ export interface CompactionSummaryMessage {
 	 * which is what invalidates the tail's pre-compaction usage reports.
 	 */
 	historyRewriteAt?: number;
+	/** Runtime-only verbatim user messages from the summarized history, oldest first. */
+	userMessages?: string[];
+	/** Runtime-only URI where the raw pre-compaction transcript can be read. */
+	historyUri?: string;
 	timestamp: number;
+}
+
+/** Runtime extras rendered next to a compaction summary. */
+export interface SummaryContextExtras {
+	userMessages?: string[];
+	historyUri?: string;
 }
 
 export type CoreCompactionMessage = CustomMessage | HookMessage | BranchSummaryMessage | CompactionSummaryMessage;
@@ -108,8 +118,12 @@ export function renderBranchSummaryContext(summary: string): string {
 	return prompt.render(BRANCH_SUMMARY_TEMPLATE, { summary });
 }
 
-export function renderCompactionSummaryContext(summary: string): string {
-	return prompt.render(COMPACTION_SUMMARY_TEMPLATE, { summary });
+export function renderCompactionSummaryContext(summary: string, extras?: SummaryContextExtras): string {
+	return prompt.render(COMPACTION_SUMMARY_TEMPLATE, {
+		summary,
+		userMessages: extras?.userMessages,
+		historyUri: extras?.historyUri,
+	});
 }
 /**
  * Wrap a handoff document for injection into the successor context. Unlike the
@@ -118,8 +132,12 @@ export function renderCompactionSummaryContext(summary: string): string {
  * this framing the successor misreads first-person "Next Steps" as fresh user
  * instructions (or tries to write the handoff again).
  */
-export function renderHandoffSummaryContext(summary: string): string {
-	return prompt.render(HANDOFF_SUMMARY_TEMPLATE, { summary });
+export function renderHandoffSummaryContext(summary: string, extras?: SummaryContextExtras): string {
+	return prompt.render(HANDOFF_SUMMARY_TEMPLATE, {
+		summary,
+		userMessages: extras?.userMessages,
+		historyUri: extras?.historyUri,
+	});
 }
 
 export function createBranchSummaryMessage(summary: string, fromId: string, timestamp: string): BranchSummaryMessage {
@@ -144,6 +162,10 @@ export interface CompactionSummaryMessageOptions {
 	tokensAfter?: number;
 	/** See {@link CompactionSummaryMessage.historyRewriteAt}. */
 	historyRewriteAt?: number;
+	/** Verbatim user messages from the summarized history, oldest first. */
+	userMessages?: string[];
+	/** URI where the raw pre-compaction transcript can be read. */
+	historyUri?: string;
 }
 
 export function createCompactionSummaryMessage(
@@ -152,7 +174,18 @@ export function createCompactionSummaryMessage(
 	timestamp: string,
 	options: CompactionSummaryMessageOptions = {},
 ): CompactionSummaryMessage {
-	const { shortSummary, providerPayload, images, blocks, warning, method, tokensAfter, historyRewriteAt } = options;
+	const {
+		shortSummary,
+		providerPayload,
+		images,
+		blocks,
+		warning,
+		method,
+		tokensAfter,
+		historyRewriteAt,
+		userMessages,
+		historyUri,
+	} = options;
 	const imageBlocks =
 		blocks?.filter((block): block is ImageContent => block.type === "image") ??
 		(images && images.length > 0 ? images : undefined);
@@ -168,6 +201,8 @@ export function createCompactionSummaryMessage(
 		images: imageBlocks && imageBlocks.length > 0 ? imageBlocks : undefined,
 		warning,
 		historyRewriteAt,
+		...(userMessages && userMessages.length > 0 ? { userMessages } : {}),
+		...(historyUri ? { historyUri } : {}),
 		timestamp: new Date(timestamp).getTime(),
 	};
 }
@@ -239,7 +274,11 @@ export function convertMessageToLlm(message: AgentMessage): Message | undefined 
 					historyRewriteAt: message.timestamp,
 					timestamp: message.timestamp,
 				};
-			case "compactionSummary":
+			case "compactionSummary": {
+				const extras: SummaryContextExtras = {
+					userMessages: message.userMessages,
+					historyUri: message.historyUri,
+				};
 				return {
 					role: "user",
 					content:
@@ -250,8 +289,8 @@ export function convertMessageToLlm(message: AgentMessage): Message | undefined 
 										type: "text" as const,
 										text:
 											message.method === "handoff"
-												? renderHandoffSummaryContext(message.summary)
-												: renderCompactionSummaryContext(message.summary),
+												? renderHandoffSummaryContext(message.summary, extras)
+												: renderCompactionSummaryContext(message.summary, extras),
 									},
 									...(message.images ?? []),
 								],
@@ -260,6 +299,7 @@ export function convertMessageToLlm(message: AgentMessage): Message | undefined 
 					providerPayload: message.providerPayload,
 					timestamp: message.timestamp,
 				};
+			}
 		}
 	}
 

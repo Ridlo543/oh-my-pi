@@ -326,7 +326,6 @@ describe("history:// protocol", () => {
 		const branch = currentBranchFixture();
 		const siblingOnly = "sibling branch text must not leak";
 		const resource = await InternalUrlRouter.instance().resolve("history://current/full", {
-			experimentalContextManagement: true,
 			getSessionBranch: () => branch,
 		});
 
@@ -339,30 +338,20 @@ describe("history:// protocol", () => {
 		expect(resource.sourcePath).toBeUndefined();
 	});
 
-	it("rejects current/full when disabled or without a caller-bound branch", async () => {
-		await expect(
-			InternalUrlRouter.instance().resolve("history://current/full", {
-				experimentalContextManagement: false,
-				getSessionBranch: currentBranchFixture,
-			}),
-		).rejects.toThrow("experimentalContextManagement");
-		await expect(
-			InternalUrlRouter.instance().resolve("history://current/full", {
-				experimentalContextManagement: true,
-			}),
-		).rejects.toThrow("bound live session branch");
+	it("rejects current/full without a caller-bound branch", async () => {
+		await expect(InternalUrlRouter.instance().resolve("history://current/full", {})).rejects.toThrow(
+			"bound live session branch",
+		);
 	});
 
 	it("rejects malformed current history routes without consulting agent history", async () => {
 		await expect(
 			InternalUrlRouter.instance().resolve("history://current/full?unexpected=true", {
-				experimentalContextManagement: true,
 				getSessionBranch: currentBranchFixture,
 			}),
 		).rejects.toThrow("Invalid history://current route");
 		await expect(
 			InternalUrlRouter.instance().resolve("history://current/extra", {
-				experimentalContextManagement: true,
 				getSessionBranch: currentBranchFixture,
 			}),
 		).rejects.toThrow("Invalid history://current route");

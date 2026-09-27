@@ -129,6 +129,28 @@ describe("countMessage", () => {
 		expect(developer).toBe(user);
 	});
 
+	test("counts pinned user messages the compaction summary renders next to its text", () => {
+		const tokenizer = new Tokenizer();
+		const summaryOnly = tokenizer.countMessage({
+			role: "compactionSummary",
+			summary: "## Goal",
+			tokensBefore: 0,
+			timestamp: 0,
+		} as AgentMessage);
+		const withPins = tokenizer.countMessage({
+			role: "compactionSummary",
+			summary: "## Goal",
+			userMessages: [TEXT],
+			tokensBefore: 0,
+			timestamp: 0,
+		} as AgentMessage);
+
+		// convertMessageToLlm sends the pins to the provider; an estimate without them
+		// understates the context that feeds the compaction trigger.
+		expect(withPins).toBe(tokenizer.countTokens(["## Goal", TEXT]));
+		expect(withPins).toBeGreaterThan(summaryOnly);
+	});
+
 	test("charges the image estimate on user and developer content, as tool results do", () => {
 		const tokenizer = new Tokenizer();
 		const inToolResult = tokenizer.countMessage({
