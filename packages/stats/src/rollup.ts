@@ -306,11 +306,15 @@ export interface RollupStatus {
 export function getRollupStatus(): RollupStatus {
 	const database = currentDb();
 	if (!database) return { dirtyHours: 0, dirtySessions: 0 };
-	return database
-		.prepare(
-			"SELECT (SELECT COUNT(*) FROM rollup_dirty) AS dirtyHours, (SELECT COUNT(*) FROM session_dirty) AS dirtySessions",
-		)
-		.get() as RollupStatus;
+	try {
+		return database
+			.prepare(
+				"SELECT (SELECT COUNT(*) FROM rollup_dirty) AS dirtyHours, (SELECT COUNT(*) FROM session_dirty) AS dirtySessions",
+			)
+			.get() as RollupStatus;
+	} catch {
+		return { dirtyHours: 0, dirtySessions: 0 };
+	}
 }
 
 /**
@@ -321,54 +325,60 @@ export function getRollupStatus(): RollupStatus {
 export function refreshRollupBatch(limit: number): number {
 	const database = currentDb();
 	if (!database) return 0;
-	const run = database.transaction(() => {
-		const buckets = database.prepare("SELECT bucket FROM rollup_dirty ORDER BY bucket DESC LIMIT ?").all(limit) as {
-			bucket: number;
-		}[];
-		const clearMessages = database.prepare("DELETE FROM message_rollup WHERE bucket = ?");
-		const clearTools = database.prepare("DELETE FROM tool_rollup WHERE bucket = ?");
-		const fillMessages = database.prepare(`
-			INSERT INTO message_rollup (${MESSAGE_ROLLUP_COLUMNS})
-			SELECT ${messageFacts("?1", "")}
-			FROM messages WHERE timestamp >= ?1 AND timestamp < ?1 + ${HOUR_MS}
-			GROUP BY ${MESSAGE_DIMENSIONS}
-		`);
-		const fillTools = database.prepare(`
-			INSERT INTO tool_rollup (${TOOL_ROLLUP_COLUMNS})
-			SELECT ${toolFacts("?1")}
-			FROM tool_calls t ${TOOL_JOIN}
-			WHERE t.timestamp >= ?1 AND t.timestamp < ?1 + ${HOUR_MS}
-			GROUP BY t.tool_name, t.model, t.provider
-		`);
-		const clean = database.prepare("DELETE FROM rollup_dirty WHERE bucket = ?");
-		for (const { bucket } of buckets) {
-			clearMessages.run(bucket);
-			clearTools.run(bucket);
-			fillMessages.run(bucket);
-			fillTools.run(bucket);
-			clean.run(bucket);
-		}
+	try {
+		const run = database.transaction(() => {
+			const buckets = database
+				.prepare("SELECT bucket FROM rollup_dirty ORDER BY bucket DESC LIMIT ?")
+				.all(limit) as {
+				bucket: number;
+			}[];
+			const clearMessages = database.prepare("DELETE FROM message_rollup WHERE bucket = ?");
+			const clearTools = database.prepare("DELETE FROM tool_rollup WHERE bucket = ?");
+			const fillMessages = database.prepare(`
+				INSERT INTO message_rollup (${MESSAGE_ROLLUP_COLUMNS})
+				SELECT ${messageFacts("?1", "")}
+				FROM messages WHERE timestamp >= ?1 AND timestamp < ?1 + ${HOUR_MS}
+				GROUP BY ${MESSAGE_DIMENSIONS}
+			`);
+			const fillTools = database.prepare(`
+				INSERT INTO tool_rollup (${TOOL_ROLLUP_COLUMNS})
+				SELECT ${toolFacts("?1")}
+				FROM tool_calls t ${TOOL_JOIN}
+				WHERE t.timestamp >= ?1 AND t.timestamp < ?1 + ${HOUR_MS}
+				GROUP BY t.tool_name, t.model, t.provider
+			`);
+			const clean = database.prepare("DELETE FROM rollup_dirty WHERE bucket = ?");
+			for (const { bucket } of buckets) {
+				clearMessages.run(bucket);
+				clearTools.run(bucket);
+				fillMessages.run(bucket);
+				fillTools.run(bucket);
+				clean.run(bucket);
+			}
 
-		// Transcripts are cheap (indexed by session_file); roll many per hour-batch.
-		const sessions = database
-			.prepare("SELECT session_file FROM session_dirty LIMIT ?")
-			.all(limit * SESSIONS_PER_HOUR) as { session_file: string }[];
-		const clearSession = database.prepare("DELETE FROM session_rollup WHERE session_file = ?");
-		const fillSession = database.prepare(`
-			INSERT INTO session_rollup (${SESSION_ROLLUP_COLUMNS})
-			SELECT ${sessionFacts("m.")}
-			FROM messages m WHERE m.session_file = ?1
-			GROUP BY m.session_file
-		`);
-		const cleanSession = database.prepare("DELETE FROM session_dirty WHERE session_file = ?");
-		for (const { session_file } of sessions) {
-			clearSession.run(session_file);
-			fillSession.run(session_file);
-			cleanSession.run(session_file);
-		}
-		return buckets.length + sessions.length;
-	});
-	return run.immediate();
+			// Transcripts are cheap (indexed by session_file); roll many per hour-batch.
+			const sessions = database
+				.prepare("SELECT session_file FROM session_dirty LIMIT ?")
+				.all(limit * SESSIONS_PER_HOUR) as { session_file: string }[];
+			const clearSession = database.prepare("DELETE FROM session_rollup WHERE session_file = ?");
+			const fillSession = database.prepare(`
+				INSERT INTO session_rollup (${SESSION_ROLLUP_COLUMNS})
+				SELECT ${sessionFacts("m.")}
+				FROM messages m WHERE m.session_file = ?1
+				GROUP BY m.session_file
+			`);
+			const cleanSession = database.prepare("DELETE FROM session_dirty WHERE session_file = ?");
+			for (const { session_file } of sessions) {
+				clearSession.run(session_file);
+				fillSession.run(session_file);
+				cleanSession.run(session_file);
+			}
+			return buckets.length + sessions.length;
+		});
+		return run.immediate();
+	} catch {
+		return 0;
+	}
 }
 
 export interface RefreshOptions {

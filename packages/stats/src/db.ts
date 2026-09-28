@@ -126,8 +126,15 @@ export async function initDb(): Promise<Database> {
 
 	// Whether `messages` predates this init — drives the one-time agent_type
 	// backfill below, so it must be sampled before CREATE TABLE adds the table.
-	const messagesTableExisted =
+	let messagesTableExisted =
 		db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages'").get() !== undefined;
+	if (messagesTableExisted) {
+		const messageColumns = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
+		if (messageColumns.length > 0 && !messageColumns.some(column => column.name === "entry_id")) {
+			db.run("DROP TABLE IF EXISTS messages");
+			messagesTableExisted = false;
+		}
+	}
 
 	// Create tables
 	db.run(`
