@@ -41,6 +41,7 @@ import {
 	sanitizeRehydratedOpenAIResponsesAssistantMessage,
 	stripInternalDetailsFields,
 } from "./messages";
+import type { RetryFallbackRole } from "./retry-fallback-chains";
 import { type BuildSessionContextOptions, buildSessionContext, type SessionContext } from "./session-context";
 import {
 	type BranchSummaryEntry,
@@ -350,6 +351,7 @@ function emptyUsageStatistics(): UsageStatistics {
 		orchestrationCacheRead: 0,
 		premiumRequests: 0,
 		cost: 0,
+		subagentCost: 0,
 	};
 }
 
@@ -491,7 +493,13 @@ class SessionEntryIndex {
 			else this.#labels.delete(entry.targetId);
 		}
 
-		addUsage(this.#usage, entryUsage(entry));
+		const usage = entryUsage(entry);
+		addUsage(this.#usage, usage);
+		// Completed `task` results carry the child's spend; tracked apart so the
+		// status line can split the session's own cost from its subagents'.
+		if (usage && entry.type === "message" && entry.message.role === "toolResult") {
+			this.#usage.subagentCost += usage.cost.total;
+		}
 	}
 
 	has(id: string): boolean {
@@ -2962,6 +2970,7 @@ export class SessionManager {
 		agent?: string;
 		modelRole?: string;
 		resolvedModel?: string;
+		retryFallback?: RetryFallbackRole;
 		readOnly?: boolean;
 		outputSchema?: unknown;
 		outputSchemaMode?: StructuredSubagentSchemaMode;
@@ -3817,6 +3826,7 @@ export interface PersistedSessionInit {
 	agent?: string;
 	modelRole?: string;
 	resolvedModel?: string;
+	retryFallback?: RetryFallbackRole;
 	readOnly?: boolean;
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
@@ -3843,6 +3853,7 @@ export function extractSessionInit(entries: readonly FileEntry[]): PersistedSess
 			agent: entry.agent,
 			modelRole: entry.modelRole,
 			resolvedModel: entry.resolvedModel,
+			retryFallback: entry.retryFallback,
 			readOnly: entry.readOnly,
 			outputSchema: entry.outputSchema,
 			outputSchemaMode: entry.outputSchemaMode,
