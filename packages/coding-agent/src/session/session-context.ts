@@ -48,6 +48,16 @@ const PINNED_USER_MESSAGES_CONTEXT_FRACTION = 0.1;
 /** Raw pre-compaction transcript of the caller's own branch (see `history-protocol.ts`). */
 const CURRENT_FULL_HISTORY_URI = "history://current/full";
 
+function isRolloverRequestEntry(entry: SessionEntry): boolean {
+	return (
+		isUserRequestEntry(entry) ||
+		(entry.type === "custom_message" &&
+			entry.customType === "irc:incoming" &&
+			isRecord(entry.details) &&
+			entry.details.fromParent === true)
+	);
+}
+
 function hasLegacySnapcompactFrames(archive: snapcompact.Archive): boolean {
 	return archive.frames.some(frame => frame.font === undefined && frame.variant === undefined);
 }
@@ -609,7 +619,10 @@ export function buildSessionContext(
 		}
 
 		// Notes-backed windows do not summarize a discarded turn prefix. Recover
-		// its latest user request verbatim, independently of the disposable tail.
+		// its latest authoritative request verbatim, independently of the
+		// disposable tail. Parent IRC delivered while idle is persisted as a
+		// custom message, while a mid-stream parent steer is a user message; both
+		// are request candidates, but peer IRC remains ordinary agent context.
 		// Resolve from the branch journal so repeated rollovers and resume retain
 		// it too, without copying messages into compaction metadata or transcripts.
 		// Attribution follows the shared turn-initiator semantics so a
@@ -619,7 +632,7 @@ export function buildSessionContext(
 			const firstKeptIdx = path.findIndex(entry => entry.id === compaction.firstKeptEntryId);
 			for (let i = compactionIdx - 1; i > resetBoundaryIdx; i--) {
 				const entry = path[i];
-				if (!isUserRequestEntry(entry)) continue;
+				if (!isRolloverRequestEntry(entry)) continue;
 				if (i < firstKeptIdx) appendMessage(entry);
 				break;
 			}
@@ -636,11 +649,14 @@ export function buildSessionContext(
 				let displayStartIdx = retainedStart;
 				if (options?.transcript) {
 					// `findCutPoint` may leave the collapsed display's kept region
-					// mid-turn. Prefer the next turn boundary, but retain the original
-					// suffix when there is no later boundary: the compaction summary
+					// mid-turn. Trim only to a new turn initiated by the user:
+					// agent-authored custom messages (such as advisor notes) can
+					// follow the final answer of that same turn. Keep the original
+					// suffix when there is no later boundary, because the summary
 					// does not include that kept content.
 					for (let i = retainedStart; i < compactionIdx; i++) {
-						if (isTurnStartEntry(path[i])) {
+						const entry = path[i];
+						if (isTurnStartEntry(entry) && (entry.type !== "custom_message" || isUserRequestEntry(entry))) {
 							displayStartIdx = i;
 							break;
 						}
